@@ -1,0 +1,457 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Dev Dashboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-100">
+    <div id="app"></div>
+    <script>
+        const state = {
+            view: localStorage.getItem('setupDone') ? 'chat' : 'setup',
+            messages: JSON.parse(localStorage.getItem('messages') || '[]'),
+            projects: JSON.parse(localStorage.getItem('projects') || '[]'),
+            drafts: JSON.parse(localStorage.getItem('drafts') || '[]'),
+            savedChats: JSON.parse(localStorage.getItem('savedChats') || '[]'),
+            currentChatId: localStorage.getItem('currentChatId') || null,
+            showingDrafts: false,
+            uploadedFiles: []
+        };
+
+        function save(key, value) {
+            localStorage.setItem(key, JSON.stringify(value));
+        }
+
+        function esc(str) {
+            const d = document.createElement('div');
+            d.textContent = str;
+            return d.innerHTML;
+        }
+
+        function hasCode() {
+            for (let i = state.messages.length - 1; i >= 0; i--) {
+                if (state.messages[i].role === 'assistant' && state.messages[i].content.includes('```html')) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        function getLastCode() {
+            for (let i = state.messages.length - 1; i >= 0; i--) {
+                if (state.messages[i].role === 'assistant') {
+                    const m = state.messages[i].content.match(/```html\n([\s\S]*?)\n```/);
+                    if (m) return m[1];
+                }
+            }
+            return null;
+        }
+
+        function render() {
+            const app = document.getElementById('app');
+            if (!app) return;
+
+            if (state.view === 'setup') {
+                app.innerHTML = '<div class="min-h-screen bg-gradient-to-br from-purple-900 to-indigo-900 p-4 flex items-center justify-center"><div class="max-w-md w-full bg-white rounded-lg shadow-2xl p-6"><h1 class="text-3xl font-bold text-center mb-6">Setup</h1><div class="mb-4"><label class="block font-bold mb-2">Gemini API Key</label><input type="text" id="geminiKey" class="w-full p-3 border rounded" value="' + (localStorage.getItem('geminiKey') || '') + '"></div><div class="mb-6"><label class="block font-bold mb-2">GitHub Token</label><input type="text" id="githubToken" class="w-full p-3 border rounded" value="' + (localStorage.getItem('githubToken') || '') + '"></div><button onclick="doSetup()" class="w-full bg-indigo-600 text-white p-3 rounded font-bold">Salva</button></div></div>';
+                return;
+            }
+
+            let html = '<nav class="bg-indigo-600 text-white p-4"><div class="flex justify-between items-center"><h1 class="text-xl font-bold">AI Dev</h1><div class="flex gap-2">';
+            html += '<button onclick="goTo(\'chat\')" class="px-4 py-2 rounded ' + (state.view === 'chat' ? 'bg-indigo-800' : 'bg-indigo-700') + '">Chat</button>';
+            html += '<button onclick="goTo(\'chats\')" class="px-4 py-2 rounded ' + (state.view === 'chats' ? 'bg-indigo-800' : 'bg-indigo-700') + '">Chats</button>';
+            html += '<button onclick="goTo(\'projects\')" class="px-4 py-2 rounded ' + (state.view === 'projects' ? 'bg-indigo-800' : 'bg-indigo-700') + '">Progetti</button>';
+            html += '<button onclick="goTo(\'setup\')" class="px-4 py-2 rounded bg-indigo-700">Setup</button>';
+            html += '</div></div></nav><div class="max-w-4xl mx-auto p-4">';
+
+            if (state.view === 'chat') {
+                html += '<div class="bg-white rounded-lg shadow-lg p-4 mb-4" style="height:60vh;overflow-y:auto" id="chatBox">';
+                if (state.messages.length === 0) {
+                    html += '<div class="text-center text-gray-500 mt-20"><p class="text-4xl mb-4"></p><p class="text-xl">Chatta con Gemini!</p></div>';
+                } else {
+                    state.messages.forEach(function(msg) {
+                        let txt = msg.content;
+                        if (msg.role === 'assistant' && txt.includes('```')) {
+                            txt = txt.replace(/```[\s\S]*?```/g, '').trim() || 'Codice generato';
+                        }
+                        html += '<div class="mb-4 ' + (msg.role === 'user' ? 'text-right' : 'text-left') + '">';
+                        html += '<div class="inline-block p-3 rounded-lg max-w-md ' + (msg.role === 'user' ? 'bg-indigo-600 text-white' : 'bg-gray-200') + '">';
+                        html += '<pre class="whitespace-pre-wrap text-sm">' + esc(txt) + '</pre></div></div>';
+                    });
+                }
+                html += '</div><div class="mb-4"><textarea id="chatInput" placeholder="Messaggio..." class="w-full p-3 border rounded resize-none" rows="4"></textarea>';
+                html += '<div class="flex gap-2 mt-2"><input type="file" id="fileInput" multiple accept="image/*,.txt,.json,.csv" style="display:none">';
+                html += '<button onclick="pickFile()" class="bg-gray-600 text-white px-4 py-3 rounded font-semibold"></button>';
+                html += '<button onclick="send()" class="flex-1 bg-indigo-600 text-white py-3 rounded font-semibold">Invia</button>';
+                if (state.messages.length > 0) html += '<button onclick="clearChat()" class="flex-1 bg-red-600 text-white py-3 rounded font-semibold">Cancella</button>';
+                html += '</div>';
+                if (state.uploadedFiles.length > 0) {
+                    html += '<div class="mt-2 flex flex-wrap gap-2">';
+                    state.uploadedFiles.forEach(function(f, i) {
+                        html += '<div class="bg-gray-200 px-3 py-1 rounded text-sm flex items-center gap-2"><span>' + esc(f.name) + '</span><button onclick="rmFile(' + i + ')" class="text-red-600 font-bold">×</button></div>';
+                    });
+                    html += '</div>';
+                }
+                html += '</div>';
+                if (hasCode()) {
+                    html += '<div class="grid grid-cols-2 gap-2 mb-2"><button onclick="preview()" class="bg-purple-600 text-white p-3 rounded font-semibold">Preview</button><button onclick="viewCode()" class="bg-gray-700 text-white p-3 rounded font-semibold">Codice</button></div>';
+                    html += '<div class="grid grid-cols-3 gap-2 mb-2"><button onclick="saveDraft()" class="bg-blue-600 text-white p-3 rounded font-semibold">Bozza</button><button onclick="createRepo()" class="bg-green-600 text-white p-3 rounded font-semibold">Repo</button><button onclick="genAPK()" class="bg-orange-600 text-white p-3 rounded font-semibold">APK</button></div>';
+                }
+                if (state.messages.length > 0) {
+                    html += '<div class="grid grid-cols-2 gap-2"><button onclick="saveChat()" class="bg-yellow-600 text-white p-3 rounded font-semibold">Salva Chat</button><button onclick="newChat()" class="bg-teal-600 text-white p-3 rounded font-semibold">Nuova Chat</button></div>';
+                }
+            } else if (state.view === 'chats') {
+                html += '<div class="mb-4"><button onclick="newChat()" class="w-full bg-teal-600 text-white p-3 rounded font-semibold">Nuova Chat</button></div>';
+                if (state.savedChats.length === 0) {
+                    html += '<div class="bg-white p-12 rounded-lg shadow text-center"><p class="text-6xl mb-4"></p><p class="text-xl">Nessuna chat salvata</p></div>';
+                } else {
+                    state.savedChats.forEach(function(chat, i) {
+                        const dt = new Date(chat.timestamp).toLocaleString('it-IT');
+                        const prev = chat.messages.length > 0 ? chat.messages[0].content.substring(0, 50) + '...' : 'Chat vuota';
+                        html += '<div class="bg-white p-4 rounded-lg shadow mb-4"><h3 class="font-bold mb-2">' + esc(chat.name) + '</h3>';
+                        html += '<p class="text-sm text-gray-600 mb-2">' + dt + ' - ' + chat.messages.length + ' messaggi</p>';
+                        html += '<p class="text-sm text-gray-500 mb-3">' + esc(prev) + '</p>';
+                        html += '<div class="flex gap-3 text-sm"><button onclick="loadChat(' + i + ')" class="text-blue-600 font-semibold">Apri</button>';
+                        html += '<button onclick="renameChat(' + i + ')" class="text-green-600">Rinomina</button>';
+                        html += '<button onclick="delChat(' + i + ')" class="text-red-600">Elimina</button></div></div>';
+                    });
+                }
+            } else if (state.view === 'projects') {
+                const lst = state.showingDrafts ? state.drafts : state.projects;
+                html += '<div class="mb-4 flex gap-2"><button onclick="toggleDrafts(false)" class="flex-1 px-4 py-2 rounded ' + (!state.showingDrafts ? 'bg-indigo-600 text-white' : 'bg-gray-200') + '">Repository</button>';
+                html += '<button onclick="toggleDrafts(true)" class="flex-1 px-4 py-2 rounded ' + (state.showingDrafts ? 'bg-indigo-600 text-white' : 'bg-gray-200') + '">Bozze</button></div>';
+                if (lst.length === 0) {
+                    html += '<div class="bg-white p-12 rounded-lg shadow text-center"><p class="text-6xl mb-4">' + (state.showingDrafts ? '' : '') + '</p><p class="text-xl">Nessun elemento</p></div>';
+                } else {
+                    lst.forEach(function(itm, i) {
+                        html += '<div class="bg-white p-4 rounded-lg shadow mb-4"><h3 class="font-bold mb-2">' + esc(itm.name) + '</h3>';
+                        if (!state.showingDrafts) html += '<a href="' + itm.repoUrl + '" target="_blank" class="text-blue-600 text-sm block mb-2">Apri</a>';
+                        html += '<div class="flex gap-3 text-sm"><button onclick="copyCode(' + i + ',' + state.showingDrafts + ')" class="text-blue-600">Codice</button>';
+                        html += '<button onclick="prevItem(' + i + ',' + state.showingDrafts + ')" class="text-purple-600">Preview</button>';
+                        if (!state.showingDrafts) html += '<button onclick="genAPKProj(' + i + ')" class="text-orange-600">APK</button>';
+                        else html += '<button onclick="promote(' + i + ')" class="text-green-600">Crea Repo</button>';
+                        html += '<button onclick="delItem(' + i + ',' + state.showingDrafts + ')" class="text-red-600">Elimina</button></div></div>';
+                    });
+                }
+            }
+
+            html += '</div>';
+            app.innerHTML = html;
+            if (state.view === 'chat') setTimeout(function() {
+                const b = document.getElementById('chatBox');
+                if (b) b.scrollTop = b.scrollHeight;
+            }, 100);
+        }
+
+        window.doSetup = function() {
+            const gk = document.getElementById('geminiKey').value;
+            const gt = document.getElementById('githubToken').value;
+            if (!gk || !gt) { alert('Compila i campi!'); return; }
+            localStorage.setItem('geminiKey', gk);
+            localStorage.setItem('githubToken', gt);
+            localStorage.setItem('setupDone', 'true');
+            state.view = 'chat';
+            render();
+        };
+
+        window.goTo = function(v) {
+            state.view = v;
+            render();
+        };
+
+        window.toggleDrafts = function(s) {
+            state.showingDrafts = s;
+            render();
+        };
+
+        window.send = async function() {
+            const inp = document.getElementById('chatInput');
+            if (!inp) return;
+            const txt = inp.value.trim();
+            if (!txt && state.uploadedFiles.length === 0) return;
+            const gk = localStorage.getItem('geminiKey');
+            if (!gk) { alert('Configura Gemini Key!'); return; }
+            let msg = txt;
+            if (state.uploadedFiles.length > 0) msg += '\n[File: ' + state.uploadedFiles.map(function(f) { return f.name; }).join(', ') + ']';
+            state.messages.push({ role: 'user', content: msg, timestamp: Date.now() });
+            save('messages', state.messages);
+            inp.value = '';
+            render();
+            try {
+                const hist = state.messages.slice(-40).map(function(m) {
+                    return { role: m.role === 'user' ? 'user' : 'model', parts: [{ text: m.content }] };
+                });
+                if (state.uploadedFiles.length > 0) {
+                    const last = hist[hist.length - 1];
+                    last.parts = [];
+                    if (txt) last.parts.push({ text: txt });
+                    state.uploadedFiles.forEach(function(f) {
+                        if (f.type.startsWith('image/')) {
+                            last.parts.push({ inline_data: { mime_type: f.type, data: f.data } });
+                        } else {
+                            last.parts.push({ text: '\nFile ' + f.name + ':\n' + f.content });
+                        }
+                    });
+                }
+                const sys = { role: 'user', parts: [{ text: "Sei un assistente AI esperto in sviluppo web, PWA e siti. Fornisci codice completo funzionante. Ogni app self-contained in HTML con CSS e JS inline. Usa HTML5, CSS3, JavaScript ES6+. Design responsive mobile-first. Codice pulito con best practices. Solo implementazioni concrete. Genera codice in blocchi markdown html. Usa Tailwind CDN o CSS inline. Web app interattive, Dashboard, Landing page, PWA, localStorage, Design moderni, UI intuitive. Analizza tecnicamente, implementa soluzioni robuste, codice production-ready. Precisione assoluta." }] };
+                const r = await fetch('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=' + gk, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ contents: [sys].concat(hist), generationConfig: { temperature: 0.3, maxOutputTokens: 8192 } })
+                });
+                const d = await r.json();
+                const ai = d.candidates[0].content.parts[0].text || 'Errore';
+                state.messages.push({ role: 'assistant', content: ai, timestamp: Date.now() });
+                save('messages', state.messages);
+                state.uploadedFiles = [];
+            } catch (e) {
+                state.messages.push({ role: 'assistant', content: 'Errore: ' + e.message, timestamp: Date.now() });
+                save('messages', state.messages);
+                state.uploadedFiles = [];
+            }
+            render();
+        };
+
+        window.clearChat = function() {
+            if (confirm('Cancellare?')) {
+                state.messages = [];
+                save('messages', state.messages);
+                render();
+            }
+        };
+
+        window.saveDraft = function() {
+            const n = prompt('Nome:');
+            if (!n) return;
+            for (let i = state.messages.length - 1; i >= 0; i--) {
+                if (state.messages[i].role === 'assistant' && state.messages[i].content.includes('```html')) {
+                    state.drafts.unshift({ name: n, code: state.messages[i].content, createdAt: Date.now() });
+                    save('drafts', state.drafts);
+                    alert('Salvata!');
+                    return;
+                }
+            }
+            alert('Nessun codice!');
+        };
+
+        window.createRepo = async function() {
+            const n = prompt('Nome repo:');
+            if (!n) return;
+            const tk = localStorage.getItem('githubToken');
+            if (!tk) { alert('Token mancante!'); return; }
+            const c = getLastCode();
+            if (!c) { alert('Nessun codice!'); return; }
+            try {
+                const r = await fetch('https://api.github.com/user/repos', {
+                    method: 'POST',
+                    headers: { 'Authorization': 'token ' + tk, 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ name: n, description: 'AI Dev', private: false, auto_init: true })
+                });
+                const rp = await r.json();
+                if (rp.html_url) {
+                    state.projects.unshift({ name: n, repoUrl: rp.html_url, code: c, createdAt: Date.now() });
+                    save('projects', state.projects);
+                    try { await navigator.clipboard.writeText(c); alert('Repo creata! Codice copiato!'); } catch (e) { alert('Repo creata!'); }
+                    if (confirm('Aprire GitHub?')) window.open('https://github.com/' + rp.full_name + '/new/main', '_blank');
+                    state.view = 'projects';
+                    render();
+                } else {
+                    alert('Errore: ' + (rp.message || 'Errore'));
+                }
+            } catch (e) {
+                alert('Errore: ' + e.message);
+            }
+        };
+
+        window.preview = function() {
+            const c = getLastCode();
+            if (!c) { alert('Nessun codice!'); return; }
+            const w = window.open('', '_blank');
+            w.document.write(c);
+            w.document.close();
+        };
+
+        window.viewCode = function() {
+            const c = getLastCode();
+            if (!c) { alert('Nessun codice!'); return; }
+            const w = window.open('', '_blank');
+            w.document.write('<html><head><meta charset="UTF-8"><style>body{margin:0;padding:20px;font-family:monospace;background:#1e1e1e;color:#d4d4d4}pre{white-space:pre-wrap;background:#2d2d2d;padding:20px;border-radius:8px}button{background:#007acc;color:white;border:none;padding:10px 20px;border-radius:4px;margin:0 10px 20px 0}</style></head><body><button onclick="navigator.clipboard.writeText(document.getElementById(\'c\').textContent).then(function(){alert(\'Copiato!\')})">Copia</button><button onclick="window.close()">Chiudi</button><pre id="c">' + esc(c) + '</pre></body></html>');
+            w.document.close();
+        };
+
+        window.genAPK = function() {
+            if (confirm('Per APK: Crea Repo, Carica codice, Attiva Pages, Usa APK in Progetti. Creare repo?')) createRepo();
+        };
+
+        window.prevItem = function(i, d) {
+            const itm = d ? state.drafts[i] : state.projects[i];
+            const m = itm.code.match(/```html\n([\s\S]*?)\n```/);
+            const w = window.open('', '_blank');
+            w.document.write(m ? m[1] : itm.code);
+            w.document.close();
+        };
+
+        window.genAPKProj = function(i) {
+            const m = state.projects[i].repoUrl.match(/github\.com\/([^\/]+)\/([^\/]+)/);
+            if (!m) { alert('URL non valido'); return; }
+            const u = 'https://' + m[1] + '.github.io/' + m[2];
+            if (confirm('APK - URL: ' + u + '. Aprire PWABuilder?')) window.open('https://www.pwabuilder.com/?site=' + encodeURIComponent(u), '_blank');
+        };
+
+        window.copyCode = function(i, d) {
+            const itm = d ? state.drafts[i] : state.projects[i];
+            if (confirm('Copiare?')) navigator.clipboard.writeText(itm.code).then(function() { alert('Copiato!'); }).catch(function() { alert('Errore'); });
+        };
+
+        window.promote = async function(i) {
+            const dr = state.drafts[i];
+            const tk = localStorage.getItem('githubToken');
+            if (!tk) { alert('Token mancante!'); return; }
+            try {
+                const r = await fetch('https://api.github.com/user/repos', {
+                    method: 'POST',
+                    headers: { 'Authorization': 'token ' + tk, 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ name: dr.name, description: 'AI Dev', private: false, auto_init: true })
+                });
+                const rp = await r.json();
+                if (rp.html_url) {
+                    state.projects.unshift({ name: dr.name, repoUrl: rp.html_url, code: dr.code, createdAt: Date.now() });
+                    save('projects', state.projects);
+                    try { await navigator.clipboard.writeText(dr.code); } catch (e) { }
+                    alert('Repo creata!');
+                    state.showingDrafts = false;
+                    render();
+                }
+            } catch (e) {
+                alert('Errore: ' + e.message);
+            }
+        };
+
+        window.delItem = function(i, d) {
+            if (confirm('Eliminare?')) {
+                if (d) state.drafts.splice(i, 1);
+                else state.projects.splice(i, 1);
+                save(d ? 'drafts' : 'projects', d ? state.drafts : state.projects);
+                render();
+            }
+        };
+
+        window.saveChat = function() {
+            if (state.messages.length === 0) { alert('Nessun messaggio!'); return; }
+            let dn = 'Chat ' + new Date().toLocaleDateString();
+            if (state.currentChatId) {
+                for (let i = 0; i < state.savedChats.length; i++) {
+                    if (state.savedChats[i].id === state.currentChatId) {
+                        dn = state.savedChats[i].name;
+                        break;
+                    }
+                }
+            }
+            const n = prompt('Nome:', dn);
+            if (!n) return;
+            const cd = { id: state.currentChatId || Date.now().toString(), name: n, messages: state.messages, timestamp: Date.now() };
+            if (state.currentChatId) {
+                let f = false;
+                for (let i = 0; i < state.savedChats.length; i++) {
+                    if (state.savedChats[i].id === state.currentChatId) {
+                        state.savedChats[i] = cd;
+                        f = true;
+                        break;
+                    }
+                }
+                if (!f) state.savedChats.unshift(cd);
+            } else {
+                state.savedChats.unshift(cd);
+                state.currentChatId = cd.id;
+                localStorage.setItem('currentChatId', state.currentChatId);
+            }
+            save('savedChats', state.savedChats);
+            alert('Chat salvata!');
+        };
+
+        window.newChat = function() {
+            if (state.messages.length > 0 && !confirm('Nuova chat? La chat corrente NON sara salvata.')) return;
+            state.messages = [];
+            state.currentChatId = null;
+            save('messages', state.messages);
+            localStorage.removeItem('currentChatId');
+            state.view = 'chat';
+            render();
+        };
+
+        window.loadChat = function(i) {
+            const ch = state.savedChats[i];
+            state.messages = JSON.parse(JSON.stringify(ch.messages));
+            state.currentChatId = ch.id;
+            save('messages', state.messages);
+            localStorage.setItem('currentChatId', state.currentChatId);
+            state.view = 'chat';
+            render();
+        };
+
+        window.renameChat = function(i) {
+            const nn = prompt('Nuovo nome:', state.savedChats[i].name);
+            if (!nn) return;
+            state.savedChats[i].name = nn;
+            save('savedChats', state.savedChats);
+            render();
+        };
+
+        window.delChat = function(i) {
+            if (!confirm('Eliminare?')) return;
+            const did = state.savedChats[i].id;
+            state.savedChats.splice(i, 1);
+            save('savedChats', state.savedChats);
+            if (state.currentChatId === did) {
+                state.messages = [];
+                state.currentChatId = null;
+                save('messages', state.messages);
+                localStorage.removeItem('currentChatId');
+            }
+            render();
+        };
+
+        window.pickFile = function() {
+            const inp = document.getElementById('fileInput');
+            if (inp) {
+                inp.onchange = function(e) {
+                    const fls = e.target.files;
+                    for (let i = 0; i < fls.length; i++) {
+                        const f = fls[i];
+                        if (f.size > 5242880) {
+                            alert('File troppo grande: ' + f.name);
+                            continue;
+                        }
+                        if (f.type.startsWith('image/')) {
+                            const rd = new FileReader();
+                            rd.onload = function(ev) {
+                                const b64 = ev.target.result.split(',')[1];
+                                state.uploadedFiles.push({ name: f.name, type: f.type, data: b64 });
+                                render();
+                            };
+                            rd.readAsDataURL(f);
+                        } else {
+                            const rd = new FileReader();
+                            rd.onload = function(ev) {
+                                state.uploadedFiles.push({ name: f.name, type: f.type, content: ev.target.result });
+                                render();
+                            };
+                            rd.readAsText(f);
+                        }
+                    }
+                    e.target.value = '';
+                };
+                inp.click();
+            }
+        };
+
+        window.rmFile = function(i) {
+            state.uploadedFiles.splice(i, 1);
+            render();
+        };
+
+        render();
+    </script>
+</body>
+</html>
